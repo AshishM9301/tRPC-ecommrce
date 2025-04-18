@@ -4,7 +4,6 @@ import Link from "next/link";
 import Image from "next/image";
 import { toast } from "sonner";
 import { useCart } from "~/store/cartStore";
-import type { CartItemWithProduct } from "~/store/cartStore";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
 import {
@@ -26,17 +25,17 @@ export default function CartPage() {
     itemCount,
     isInitialized,
     error,
-    updateItemQuantity,
-    removeItem,
+    updateCartItem,
+    removeFromCart,
     isLoading,
   } = useCart();
 
   const handleQuantityChange = async (itemId: number, newQuantity: number) => {
     try {
       if (newQuantity < 1) {
-        await removeItem(itemId);
+        await removeFromCart(itemId);
       } else {
-        await updateItemQuantity(itemId, newQuantity);
+        await updateCartItem(itemId, newQuantity);
       }
     } catch (error) {
       toast.error("Failed to update quantity");
@@ -45,7 +44,7 @@ export default function CartPage() {
 
   const handleRemoveItem = async (itemId: number) => {
     try {
-      await removeItem(itemId);
+      await removeFromCart(itemId);
     } catch (error) {
       toast.error("Failed to remove item");
     }

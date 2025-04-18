@@ -10,7 +10,7 @@ import type { ReactNode } from "react";
 import { Navbar } from "~/components/layout/Navbar";
 import PublicLayout from "./(public)/layout";
 import AdminLayout from "./admin/layout";
-import type { NextRequest } from "next/server";
+import { StoreProvider } from "~/providers/store-provider";
 
 export const metadata: Metadata = {
   title: "T3 Shoe Store",
@@ -31,8 +31,10 @@ export default function RootLayout({
       <body className="bg-background min-h-screen font-sans antialiased">
         <AuthProvider>
           <TRPCReactProvider>
-            <PublicLayout>{children}</PublicLayout>
-            <Toaster />
+            <StoreProvider>
+              <PublicLayout>{children}</PublicLayout>
+              <Toaster />
+            </StoreProvider>
           </TRPCReactProvider>
         </AuthProvider>
       </body>

@@ -3,38 +3,17 @@ import { toast } from "sonner";
 import { api } from "~/trpc/react";
 import type { inferRouterOutputs } from "@trpc/server";
 import type { AppRouter } from "~/server/api/root";
+import { useAuth } from "~/context/AuthContext";
 import { useEffect } from "react";
-import type { StateCreator } from "zustand";
 
-// Derive RouterOutputs from AppRouter
-type RouterOutputs = inferRouterOutputs<AppRouter>;
-type CartWithItems = RouterOutputs["cart"]["getCart"];
+// Types
+type RouterOutput = inferRouterOutputs<AppRouter>;
+type CartData = RouterOutput["cart"]["getCart"];
+type Product = NonNullable<CartData["items"][number]["product"]>;
+type CartItem = CartData["items"][number];
+type CartItemWithProduct = Omit<CartItem, "product"> & { product: Product };
 
-// Define types based on tRPC output
-interface Product {
-  id: number;
-  name: string;
-  description: string | null;
-  price: number;
-  imageUrl: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-interface CartItem {
-  id: number;
-  quantity: number;
-  productId: number;
-  cartId: string;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-export interface CartItemWithProduct extends CartItem {
-  product: Product | null;
-}
-
-export interface CartState {
+interface CartState {
   items: CartItemWithProduct[];
   itemCount: number;
   total: number;
@@ -43,219 +22,195 @@ export interface CartState {
   error: string | null;
 }
 
-export interface CartActions {
-  _recalculateTotals: (items: CartItemWithProduct[]) => void;
+interface CartActions {
   _setState: (newState: Partial<CartState>) => void;
+  _recalculateTotals: (items: CartItemWithProduct[]) => void;
   clearCartClient: () => void;
   resetCart: () => void;
 }
 
 type CartStore = CartState & CartActions;
 
-const cartStateCreator: StateCreator<CartStore> = (set, get) => ({
-  // Initial state
+const defaultInitState: CartState = {
   items: [],
   itemCount: 0,
   total: 0,
   isLoading: false,
   isInitialized: false,
   error: null,
+};
 
-  _setState: (newState: Partial<CartState>) => set(newState),
+const calculateTotals = (items: CartItemWithProduct[]) => {
+  const validItems = items.filter((item): item is CartItemWithProduct => Boolean(item?.product));
+  const itemCount = validItems.reduce((sum, item) => sum + item.quantity, 0);
+  const total = validItems.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
+  return { itemCount, total };
+};
 
-  _recalculateTotals: (items: CartItemWithProduct[]) => {
-    const validItems = items?.filter(Boolean) ?? [];
-    const itemCount = validItems.reduce((sum, item) => sum + (item.quantity ?? 0), 0);
-    const total = validItems.reduce((sum, item) => {
-      const price = item.product?.price ?? 0;
-      return sum + price * (item.quantity ?? 0);
-    }, 0);
-    set({ itemCount, total });
+// Create the store
+export const useCartStore = create<CartStore>((set, get) => ({
+  ...defaultInitState,
+  _setState: (newState) => {
+    const currentState = get();
+    const nextState = { ...currentState, ...newState };
+    
+    // Only update if state has actually changed
+    if (JSON.stringify(currentState) !== JSON.stringify(nextState)) {
+      set(nextState);
+    }
   },
-
+  _recalculateTotals: (items) => {
+    const { itemCount, total } = calculateTotals(items);
+    const currentState = get();
+    
+    // Only update if totals have changed
+    if (currentState.itemCount !== itemCount || currentState.total !== total) {
+      set({ itemCount, total });
+    }
+  },
   clearCartClient: () => {
-    set({ items: [], itemCount: 0, total: 0, error: null, isInitialized: true });
-  },
-
-  resetCart: () => {
-    set({
-      items: [],
-      itemCount: 0,
-      total: 0,
-      isLoading: false,
-      isInitialized: false,
-      error: null,
+    set({ 
+      items: [], 
+      itemCount: 0, 
+      total: 0, 
+      error: null, 
+      isInitialized: true,
+      isLoading: false 
     });
   },
-});
-
-export const useCartStore = create<CartStore>(cartStateCreator);
+  resetCart: () => set(defaultInitState),
+}));
 
 // Custom hook for cart operations
-export function useCart() {
-  const store = useCartStore();
+export const useCart = () => {
+  const { user } = useAuth();
+  const cart = useCartStore();
   const utils = api.useUtils();
-  
-  const cartQuery = api.cart.getCart.useQuery(undefined, {
-    enabled: !store.isInitialized,
+
+  // Fetch cart data
+  const { data: cartData, isLoading: isCartLoading } = api.cart.getCart.useQuery(undefined, {
+    enabled: !!user,
     retry: false,
     refetchOnWindowFocus: false,
-    staleTime: 60 * 1000, // Consider data fresh for 1 minute
+    staleTime: 30 * 1000, // Cache for 30 seconds
   });
 
+  // Update cart state when data changes
+  useEffect(() => {
+    if (!cartData) return;
+    
+    cart._setState({ 
+      items: cartData.items as CartItemWithProduct[], 
+      isInitialized: true,
+      error: null 
+    });
+    cart._recalculateTotals(cartData.items as CartItemWithProduct[]);
+  }, [cartData, cart]);
+
+  const handleError = (message: string) => {
+    cart._setState({ error: message });
+    toast.error(message);
+  };
+
+  const handleSuccess = (message: string) => {
+    toast.success(message);
+  };
+
   const addItemMutation = api.cart.addItem.useMutation({
-    onSuccess: () => {
-      void utils.cart.getCart.invalidate();
-      void cartQuery.refetch();
+    onMutate: () => {
+      cart._setState({ isLoading: true, error: null });
     },
+    onSuccess: () => {
+      handleSuccess("Item added to cart");
+      void utils.cart.getCart.invalidate();
+    },
+    onError: () => handleError("Failed to add item to cart"),
+    onSettled: () => {
+      cart._setState({ isLoading: false });
+    }
   });
 
   const updateItemMutation = api.cart.updateItemQuantity.useMutation({
-    onSuccess: () => {
-      void utils.cart.getCart.invalidate();
-      void cartQuery.refetch();
+    onMutate: () => {
+      cart._setState({ isLoading: true, error: null });
     },
+    onSuccess: () => {
+      handleSuccess("Cart updated");
+      void utils.cart.getCart.invalidate();
+    },
+    onError: () => handleError("Failed to update cart"),
+    onSettled: () => {
+      cart._setState({ isLoading: false });
+    }
   });
 
   const removeItemMutation = api.cart.removeItem.useMutation({
-    onSuccess: () => {
-      void utils.cart.getCart.invalidate();
-      void cartQuery.refetch();
+    onMutate: () => {
+      cart._setState({ isLoading: true, error: null });
     },
+    onSuccess: () => {
+      handleSuccess("Item removed from cart");
+      void utils.cart.getCart.invalidate();
+    },
+    onError: () => handleError("Failed to remove item from cart"),
+    onSettled: () => {
+      cart._setState({ isLoading: false });
+    }
   });
 
   const clearCartMutation = api.cart.clearCart.useMutation({
-    onSuccess: () => {
-      void utils.cart.getCart.invalidate();
-      void cartQuery.refetch();
+    onMutate: () => {
+      cart._setState({ isLoading: true, error: null });
     },
+    onSuccess: () => {
+      cart.clearCartClient();
+      handleSuccess("Cart cleared");
+      void utils.cart.getCart.invalidate();
+    },
+    onError: () => handleError("Failed to clear cart"),
+    onSettled: () => {
+      cart._setState({ isLoading: false });
+    }
   });
 
-  useEffect(() => {
-    if (!cartQuery.isLoading && cartQuery.data) {
-      store._setState({
-        items: cartQuery.data.items,
-        isInitialized: true,
-        isLoading: false,
-      });
-      store._recalculateTotals(cartQuery.data.items);
-    }
-  }, [cartQuery.data, cartQuery.isLoading]);
-
-  const addItem = async (
-    productId: number,
-    quantity: number,
-    options?: { onSuccess?: () => void; onError?: (error: Error) => void }
-  ) => {
-    try {
-      store._setState({ isLoading: true });
-      const newItem = await addItemMutation.mutateAsync({ productId, quantity });
-      const currentItems = store.items;
-      const updatedItems = [...currentItems, newItem];
-      store._recalculateTotals(updatedItems);
-      store._setState({ items: updatedItems, isLoading: false });
-      toast.success("Item added to cart");
-      options?.onSuccess?.();
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "Failed to add item";
-      store._setState({ isLoading: false, error: errorMessage });
-      toast.error(errorMessage);
-      options?.onError?.(error instanceof Error ? error : new Error(errorMessage));
-    }
-  };
-
-  const updateItemQuantity = async (
-    cartItemId: number,
-    quantity: number,
-    options?: { onSuccess?: () => void; onError?: (error: Error) => void }
-  ) => {
-    if (quantity < 1) {
-      await removeItem(cartItemId, options);
+  const addToCart = async (productId: number, quantity = 1) => {
+    if (!user) {
+      handleError("Please login to add items to cart");
       return;
     }
-    try {
-      store._setState({ isLoading: true });
-      const updatedItem = await updateItemMutation.mutateAsync({ cartItemId, quantity });
-      const currentItems = store.items;
-      const newItems = currentItems.map((item: CartItemWithProduct) =>
-        item.id === cartItemId ? updatedItem : item
-      );
-      store._recalculateTotals(newItems);
-      store._setState({ items: newItems, isLoading: false });
-      toast.success("Cart updated");
-      options?.onSuccess?.();
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "Failed to update quantity";
-      store._setState({ isLoading: false, error: errorMessage });
-      toast.error(errorMessage);
-      options?.onError?.(error instanceof Error ? error : new Error(errorMessage));
-    }
+    await addItemMutation.mutateAsync({ productId, quantity });
   };
 
-  const removeItem = async (
-    cartItemId: number,
-    options?: { onSuccess?: () => void; onError?: (error: Error) => void }
-  ) => {
-    try {
-      store._setState({ isLoading: true });
-      await removeItemMutation.mutateAsync({ cartItemId });
-      const currentItems = store.items;
-      const newItems = currentItems.filter((item: CartItemWithProduct) => item.id !== cartItemId);
-      store._recalculateTotals(newItems);
-      store._setState({ items: newItems, isLoading: false });
-      toast.success("Item removed from cart");
-      options?.onSuccess?.();
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "Failed to remove item";
-      store._setState({ isLoading: false, error: errorMessage });
-      toast.error(errorMessage);
-      options?.onError?.(error instanceof Error ? error : new Error(errorMessage));
+  const updateCartItem = async (cartItemId: number, quantity: number) => {
+    if (!user) {
+      handleError("Please login to update cart");
+      return;
     }
+    await updateItemMutation.mutateAsync({ cartItemId, quantity });
+  };
+
+  const removeFromCart = async (cartItemId: number) => {
+    if (!user) {
+      handleError("Please login to remove items from cart");
+      return;
+    }
+    await removeItemMutation.mutateAsync({ cartItemId });
   };
 
   const clearCart = async () => {
-    try {
-      store._setState({ isLoading: true });
-      await clearCartMutation.mutateAsync();
-      store._setState({ items: [], itemCount: 0, total: 0, isLoading: false });
-      toast.success("Cart cleared");
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "Failed to clear cart";
-      store._setState({ isLoading: false, error: errorMessage });
-      toast.error(errorMessage);
+    if (!user) {
+      handleError("Please login to clear cart");
+      return;
     }
+    await clearCartMutation.mutateAsync();
   };
 
   return {
-    ...store,
-    addItem,
-    updateItemQuantity,
-    removeItem,
+    ...cart,
+    isLoading: cart.isLoading || isCartLoading,
+    addToCart,
+    updateCartItem,
+    removeFromCart,
     clearCart,
-    isLoading: store.isLoading || cartQuery.isLoading,
-    error: store.error ?? cartQuery.error?.message,
   };
-}
-
-export function CartStoreInitializer() {
-  const { data: cartData, isLoading } = api.cart.getCart.useQuery(undefined, {
-    enabled: true,
-    retry: false,
-    refetchOnWindowFocus: false,
-  });
-
-  const store = useCartStore();
-
-  useEffect(() => {
-    if (!isLoading && cartData) {
-      store._setState({
-        items: cartData.items,
-        isInitialized: true,
-        isLoading: false,
-      });
-      store._recalculateTotals(cartData.items);
-    }
-  }, [cartData, isLoading, store]);
-
-  return null;
-}
+};
