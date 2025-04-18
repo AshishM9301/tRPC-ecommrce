@@ -46,16 +46,17 @@ export const createTRPCContext = async (opts: { headers: Headers }) => {
 
   // Function to verify token and get user data when needed
   const getUserFromToken = async (): Promise<UserContext> => {
+    // console.log("getUserFromToken", token);
     if (!token) {
       return { userId: null, roles: [] };
     }
     try {
       const decodedToken = await verifyFirebaseToken(token);
-      if (!decodedToken?.uid) {
+      if (!decodedToken?.user_id) {
         console.log("Token verification failed or UID missing");
         return { userId: null, roles: [] };
       }
-      const userId = decodedToken.uid;
+      const userId = decodedToken.user_id as string;
       const roles = await getUserRoles(userId);
       return { userId, roles };
     } catch (error) {
@@ -152,6 +153,7 @@ export const publicProcedure = t.procedure.use(timingMiddleware);
  */
 const enforceUserIsAuthed = t.middleware(async ({ ctx, next }) => {
   const user = await ctx.getUserFromToken();
+  console.log("enforceUserIsAuthed", user);
   if (!user.userId) {
     throw new TRPCError({ code: "UNAUTHORIZED", message: "Not authenticated" });
   }

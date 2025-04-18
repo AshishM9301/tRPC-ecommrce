@@ -56,6 +56,7 @@ export async function verifyFirebaseToken(token: string): Promise<admin.auth.Dec
   }
   try {
     const decodedToken = await authAdmin.verifyIdToken(token);
+    console.log("decodedToken", decodedToken);
     return decodedToken;
   } catch (error) {
     console.error('Error verifying Firebase ID token:', error);
